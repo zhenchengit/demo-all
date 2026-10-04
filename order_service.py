@@ -11,7 +11,7 @@ Business rules:
 """
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 
 
@@ -27,16 +27,24 @@ class Item:
 
     def __post_init__(self):
         self.unit_price = money(self.unit_price)
-        self.quantity = int(self.quantity)
+        if isinstance(self.quantity, bool):
+            raise ValueError("Quantity must be a positive whole number")
+        try:
+            quantity = Decimal(str(self.quantity))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("Quantity must be a positive whole number") from exc
+        if not quantity.is_finite() or quantity <= 0 or quantity != quantity.to_integral_value():
+            raise ValueError("Quantity must be a positive whole number")
+        self.quantity = int(quantity)
         if self.quantity <= 0 or self.unit_price < 0:
             raise ValueError("Invalid item price or quantity")
 
 
 class Order:
-    def __init__(self, order_id, events=[]):
+    def __init__(self, order_id, events=None):
         self.order_id = order_id
         self.items = []
-        self.events = events
+        self.events = list(events) if events is not None else []
 
     def add(self, sku, unit_price, quantity=1):
         self.items.append(Item(sku, unit_price, quantity))
@@ -46,24 +54,20 @@ class Order:
 class CheckoutService:
     def __init__(self, tax_rate="0.075"):
         self.tax_rate = Decimal(tax_rate)
-        self._quotes = {}
 
     def quote(self, order, coupon=None, shipping="standard"):
         if shipping not in ("standard", "express"):
             raise ValueError("Unsupported shipping method")
-        cache_key = (order.order_id, coupon)
-        if cache_key in self._quotes:
-            return dict(self._quotes[cache_key])
 
         subtotal = sum((item.unit_price * item.quantity for item in order.items), Decimal("0"))
         discount = Decimal("0")
-        if coupon == "SAVE10" and subtotal > Decimal("100"):
+        if coupon == "SAVE10" and subtotal >= Decimal("100"):
             discount = money(subtotal * Decimal("0.10"))
         merchandise = subtotal - discount
         delivery = Decimal("20") if shipping == "express" else (
             Decimal("0") if merchandise >= Decimal("100") else Decimal("8")
         )
-        tax = money(subtotal * self.tax_rate)
+        tax = money(merchandise * self.tax_rate)
         result = {
             "order_id": order.order_id,
             "subtotal": str(money(subtotal)),
@@ -72,8 +76,7 @@ class CheckoutService:
             "tax": str(tax),
             "total": str(money(merchandise + delivery + tax)),
         }
-        self._quotes[cache_key] = result
-        return dict(result)
+        return result
 
 
 def main():
